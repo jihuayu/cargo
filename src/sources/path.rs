@@ -589,6 +589,21 @@ fn _list_files(pkg: &Package, gctx: &GlobalContext) -> CargoResult<Vec<PathEntry
         None
     };
 
+    // An explicit target directory may live inside the package. It holds
+    // build output, not sources: hashing it makes every build look changed
+    // (a new binary, fingerprints, ...), so it must not be listed. `target`
+    // is skipped by the walk below; other names are not.
+    let target_dir = gctx.target_dir()?.map(|dir| {
+        let dir = dir.into_path_unlocked();
+        std::fs::canonicalize(&dir).unwrap_or(dir)
+    });
+    let root_canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let target_dir_rel = target_dir
+        .as_deref()
+        .and_then(|dir| dir.strip_prefix(&root_canonical).ok())
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(Path::to_path_buf);
+
     let mut exclude_builder = GitignoreBuilder::new(root);
     if no_include_option && git_repo.is_none() {
         // no include option and not git repo discovered (see rust-lang/cargo#7183).
@@ -628,6 +643,12 @@ fn _list_files(pkg: &Package, gctx: &GlobalContext) -> CargoResult<Vec<PathEntry
         let Ok(relative_path) = path.strip_prefix(root) else {
             return false;
         };
+
+        if let Some(target_dir) = target_dir_rel.as_deref() {
+            if relative_path.starts_with(target_dir) {
+                return false;
+            }
+        }
 
         let rel = relative_path.as_os_str();
         if rel == "Cargo.lock" || rel == "Cargo.toml" {
@@ -897,6 +918,14 @@ fn list_files_walk(
 
             // Don't recurse into any sub-packages that we have.
             if !at_root && path.join("Cargo.toml").exists() {
+                return false;
+            }
+
+            // Don't recurse into a directory tagged as a cache. This covers
+            // Cargo's target directories, including a custom `--target-dir`
+            // left behind by an earlier build, which must not be mistaken for
+            // sources when the directory is not in `.gitignore`.
+            if !at_root && path.join("CACHEDIR.TAG").is_file() {
                 return false;
             }
 

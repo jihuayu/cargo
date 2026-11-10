@@ -232,25 +232,22 @@ impl<'gctx> Workspace<'gctx> {
             ws.root_manifest = ws.find_root(manifest_path)?;
         }
 
-        // Convention over configuration: `./target` and the shared build-dir
-        // are fixed, so flags or env vars (often passed by tools and agents)
-        // cannot scatter build output across the disk.
+        // `--target-dir`, `CARGO_TARGET_DIR` and `build.target-dir` decide
+        // where the final artifacts are uplifted. They do not move the
+        // intermediate build-dir: in the fork's default mode that stays the
+        // shared one (see `Workspace::build_dir`), so pointing the target-dir
+        // elsewhere neither scatters nor splits the cache that makes builds
+        // fast. `build.build-dir` stays fixed for the same reason the fork
+        // exists: one bounded, shared cache.
+        ws.target_dir = gctx.target_dir()?;
+        let configured_build_dir = gctx.build_dir(ws.root_manifest())?;
         if crate::workspace::features::is_fork_defaults_opt_out() {
-            ws.target_dir = gctx.target_dir()?;
-            ws.build_dir = gctx.build_dir(ws.root_manifest())?;
-        } else {
-            if gctx.target_dir()?.is_some() {
-                gctx.shell().warn(
-                    "ignoring the configured target directory (--target-dir, \
-                     CARGO_TARGET_DIR, build.target-dir); this cargo always uses `./target`",
-                )?;
-            }
-            if gctx.build_dir(ws.root_manifest())?.is_some() {
-                gctx.shell().warn(
-                    "ignoring the configured build directory (build.build-dir); \
-                     this cargo always uses `~/.cargo/targets`",
-                )?;
-            }
+            ws.build_dir = configured_build_dir;
+        } else if configured_build_dir.is_some() {
+            gctx.shell().warn(
+                "ignoring the configured build directory (build.build-dir); \
+                 this cargo always uses `~/.cargo/targets`",
+            )?;
         }
 
         ws.custom_metadata = ws
@@ -557,10 +554,13 @@ impl<'gctx> Workspace<'gctx> {
     /// Their metadata hash never depends on the workspace, so projects with
     /// the same dependency, features and profile reuse one build.
     ///
+    /// An explicit target-dir only moves the final artifacts; it does not
+    /// disable sharing, since the build units live in the build-dir.
+    ///
     /// `CARGO_SHARED_DEPS=0` keeps them in the project's build-dir.
     pub fn shared_deps_dir(&self) -> Option<PathBuf> {
         if self.build_dir.is_some()
-            || self.target_dir.is_some()
+            || self.is_ephemeral
             || self.root_maybe().is_embedded()
             || crate::workspace::features::is_fork_defaults_opt_out()
             || self.gctx.get_env_os("CARGO_SHARED_DEPS") == Some("0".as_ref())

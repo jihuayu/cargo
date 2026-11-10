@@ -375,7 +375,8 @@ impl<'gctx> InstallablePackage<'gctx> {
         let mut td_opt = None;
         let mut needs_cleanup = false;
         if !self.source_id.is_path() {
-            // The configured target directory is ignored, see `Workspace::new`.
+            // Registry installs build in a temporary target directory; only
+            // the fork defaults opt-out uses the configured one.
             let configured = if crate::workspace::features::is_fork_defaults_opt_out() {
                 self.gctx.target_dir()?
             } else {

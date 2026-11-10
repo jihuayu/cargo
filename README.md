@@ -113,11 +113,13 @@ directories (2.3 GB and 0.4 GB) plus the shared dependencies (2.2 GB).
 - **One build directory per project.** Your crates build in
   `~/.cargo/targets/<name>-<hash>/`; the hash comes from the repository's main
   `.git` directory, so every worktree lands there wherever it is created.
-  Binaries still appear in `./target`.
-- **Fixed directories.** `./target` and `~/.cargo/targets` cannot be moved:
-  `--target-dir`, `CARGO_TARGET_DIR`, `build.target-dir` and `build.build-dir`
-  are ignored with a warning, so no flag, env var or tool can scatter build
-  output elsewhere.
+- **A fixed build directory, a movable target directory.** The intermediate
+  build directory cannot be moved: `build.build-dir` is ignored with a
+  warning, so no flag, env var or tool can scatter the cache. Final artifacts
+  still go to `./target`, or wherever `--target-dir`, `CARGO_TARGET_DIR` or
+  `build.target-dir` points. Those choose only where binaries and libraries
+  are uplifted; the shared build directory stays in use, so switching the
+  target directory does not rebuild dependencies.
 - **Dependencies are shared by every project.** Registry and git dependencies
   build once in `~/.cargo/targets/shared-deps/` and are reused by any project
   that needs the same version, features and profile, the way Go's build cache

@@ -1,11 +1,14 @@
-//! Tests for this fork's defaults: fixed target and build directories and
-//! the build-dir garbage collector. The rest of the testsuite runs with
-//! `__CARGO_FORK_DEFAULTS_OPT_OUT=1`; these tests remove it.
+//! Tests for this fork's defaults: a fixed build directory, the honored
+//! target directory and the build-dir garbage collector. The rest of the
+//! testsuite runs with `__CARGO_FORK_DEFAULTS_OPT_OUT=1`; these tests remove
+//! it.
 
+use std::env::consts::EXE_SUFFIX;
 use std::fs;
 use std::path::PathBuf;
 
 use crate::prelude::*;
+use crate::utils::cargo_process;
 use cargo_test_support::registry::Package;
 use cargo_test_support::{Execs, Project, basic_lib_manifest, git, paths, project, str};
 
@@ -28,7 +31,7 @@ fn shared_build_dir() -> PathBuf {
 }
 
 #[cargo_test]
-fn target_dir_cannot_be_moved() {
+fn target_dir_is_honored() {
     let p = project()
         .file("src/main.rs", "fn main() {}")
         .file(
@@ -43,7 +46,94 @@ fn target_dir_cannot_be_moved() {
     fork_cargo(&p, "build --target-dir flag-dir")
         .env("CARGO_TARGET_DIR", "env-dir")
         .with_stderr_data(str![[r#"
-[WARNING] ignoring the configured target directory (--target-dir, CARGO_TARGET_DIR, build.target-dir); this cargo always uses `./target`
+[WARNING] ignoring the configured build directory (build.build-dir); this cargo always uses `~/.cargo/targets`
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    // The command-line flag wins, and no other target directory appears.
+    assert!(
+        p.root()
+            .join(format!("flag-dir/debug/foo{EXE_SUFFIX}"))
+            .is_file()
+    );
+    for dir in ["target", "env-dir", "config-build-dir"] {
+        assert!(!p.root().join(dir).exists(), "{dir} was created");
+    }
+    // Intermediate files stay in the shared build-dir, not in the target-dir.
+    assert!(shared_build_dir().join("debug/build").is_dir());
+    assert!(!p.root().join("flag-dir/debug/build").exists());
+
+    // A second build into the same directory reuses the units.
+    fork_cargo(&p, "build --target-dir flag-dir")
+        .with_stderr_data(str![[r#"
+[WARNING] ignoring the configured build directory (build.build-dir); this cargo always uses `~/.cargo/targets`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn target_dir_from_env_and_config_is_honored() {
+    let p = project()
+        .file("src/main.rs", "fn main() {}")
+        .file(
+            ".cargo/config.toml",
+            r#"
+            [build]
+            target-dir = "config-target-dir"
+            "#,
+        )
+        .build();
+
+    fork_cargo(&p, "build")
+        .env("CARGO_TARGET_DIR", "env-dir")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    assert!(
+        p.root()
+            .join(format!("env-dir/debug/foo{EXE_SUFFIX}"))
+            .is_file()
+    );
+    assert!(!p.root().join("config-target-dir").exists());
+
+    // Without the environment variable the config value applies, and the
+    // units already built are reused rather than compiled again.
+    fork_cargo(&p, "build")
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    assert!(
+        p.root()
+            .join(format!("config-target-dir/debug/foo{EXE_SUFFIX}"))
+            .is_file()
+    );
+}
+
+#[cargo_test]
+fn build_dir_cannot_be_moved() {
+    let p = project()
+        .file("src/main.rs", "fn main() {}")
+        .file(
+            ".cargo/config.toml",
+            r#"
+            [build]
+            build-dir = "config-build-dir"
+            "#,
+        )
+        .build();
+
+    fork_cargo(&p, "build")
+        .with_stderr_data(str![[r#"
 [WARNING] ignoring the configured build directory (build.build-dir); this cargo always uses `~/.cargo/targets`
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -52,11 +142,104 @@ fn target_dir_cannot_be_moved() {
         .run();
 
     assert!(p.bin("foo").is_file());
-    for dir in ["flag-dir", "env-dir", "config-build-dir"] {
-        assert!(!p.root().join(dir).exists(), "{dir} was created");
-    }
+    assert!(!p.root().join("config-build-dir").exists());
     assert!(shared_build_dir().join("debug/build").is_dir());
-    assert!(!p.root().join("target/debug/build").exists());
+}
+
+#[cargo_test]
+fn target_dir_keeps_shared_deps() {
+    Package::new("bar", "1.0.0")
+        .file("src/lib.rs", "pub fn bar() {}")
+        .publish();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "foo"
+            version = "0.1.0"
+            edition = "2015"
+
+            [dependencies]
+            bar = "1.0"
+            "#,
+        )
+        .file("src/main.rs", "fn main() { bar::bar(); }")
+        .build();
+
+    // With an explicit target-dir, `check` still builds `bar` into the
+    // shared cache instead of only checking it.
+    fork_cargo(&p, "check --target-dir one")
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to highest compatible version
+[DOWNLOADING] crates ...
+[DOWNLOADED] bar v1.0.0 (registry `dummy-registry`)
+[COMPILING] bar v1.0.0
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    // The build below reuses `bar` from the shared cache.
+    fork_cargo(&p, "build --target-dir one")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    assert!(
+        p.root()
+            .join(format!("one/debug/foo{EXE_SUFFIX}"))
+            .is_file()
+    );
+
+    // Another target-dir only moves the final artifacts.
+    fork_cargo(&p, "build --target-dir two")
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    assert!(
+        p.root()
+            .join(format!("two/debug/foo{EXE_SUFFIX}"))
+            .is_file()
+    );
+    assert!(
+        paths::cargo_home()
+            .join("targets/shared-deps/debug")
+            .is_dir()
+    );
+}
+
+/// Ephemeral workspaces build in a temporary target directory and must not
+/// seed the machine-wide dependency cache.
+#[cargo_test]
+fn install_does_not_use_shared_deps() {
+    Package::new("foo", "0.0.1")
+        .file("src/main.rs", "fn main() {}")
+        .publish();
+
+    cargo_process("install foo")
+        .env_remove("__CARGO_FORK_DEFAULTS_OPT_OUT")
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[DOWNLOADING] crates ...
+[DOWNLOADED] foo v0.0.1 (registry `dummy-registry`)
+[INSTALLING] foo v0.0.1
+[COMPILING] foo v0.0.1
+[FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s
+[INSTALLING] [ROOT]/home/.cargo/bin/foo[EXE]
+[INSTALLED] package `foo v0.0.1` (executable `foo[EXE]`)
+[WARNING] be sure to add `[ROOT]/home/.cargo/bin` to your PATH to be able to run the installed binaries
+
+"#]])
+        .run();
+
+    assert!(!paths::cargo_home().join("targets/shared-deps").exists());
 }
 
 #[cargo_test]
